@@ -246,8 +246,8 @@ if [[ "$(uname -s)" == "Darwin" ]]; then
 </dict>
 </plist>
 PLIST
-    UID=$(id -u)
-    launchctl bootstrap "gui/$UID" "$SYNC_PLIST" >/dev/null 2>&1 \
+    BEEVAST_UID=$(id -u)
+    launchctl bootstrap "gui/$BEEVAST_UID" "$SYNC_PLIST" >/dev/null 2>&1 \
       || launchctl load "$SYNC_PLIST" >/dev/null 2>&1 || true
     ok "Installed shared-sync launchd job (every 30 min)"
   else
