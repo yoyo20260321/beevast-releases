@@ -1,42 +1,34 @@
 #!/usr/bin/env bash
 #
-# RFC 0010 M2 — BeeVast one-line installer.
+# RFC 0010 M2 + #18 — BeeVast bootstrap installer.
+#
+# Installs the **dispatcher only** (~/.beevast/bin/beevast). No products
+# are installed by this script — once `beevast` is on PATH, run:
+#
+#   beevast install master-brain --env prod
 #
 # Usage:
-#   GITHUB_TOKEN=ghp_xxx curl -fsSL <install.sh URL> | sh
+#   curl -fsSL <install.sh URL> | sh
+#   BEEVAST_CHANNEL=beta curl -fsSL <install.sh URL> | sh       (rc.x stage)
+#   BEEVAST_TARBALL=/path/to/beevast-0.1.0.tar.gz ./install.sh  (dev/test)
 #
-#   # Install a specific env (default prod):
-#   GITHUB_TOKEN=ghp_xxx BEEVAST_ENV=pre1 curl -fsSL <install.sh URL> | sh
-#
-#   # Install a specific channel (default stable):
-#   GITHUB_TOKEN=ghp_xxx BEEVAST_CHANNEL=beta curl -fsSL <install.sh URL> | sh
-#
-#   # Dev/test: install from a local tarball without GitHub:
-#   BEEVAST_TARBALL=/path/to/beevast-0.1.0.tar.gz ./install.sh
-#
-# Behavior (RFC 0010 决策 2/3/4/5/6/10/11/12):
-#   - Fail-fast on missing prereqs (Node 22+, npm, GITHUB_TOKEN, GitHub SSH key)
-#   - Install into ~/.beevast/apps/<product>/envs/<env>/
-#   - npm install better-sqlite3 (no native in tarball)
-#   - Clone beevast-shared via SSH (if not already present)
-#   - Build ~/.beevast/bin/beevast-<env> symlink
-#   - Append PATH export to .zshrc / .bashrc (idempotent)
+# Behavior:
+#   - Fail-fast on missing prereqs (Node 22+, GitHub SSH key)
+#   - Download beevast-<v>.tar.gz from public mirror
+#   - Extract dispatcher to ~/.beevast/bin/beevast
+#   - Clone beevast-shared to ~/.beevast/shared (for memory/skills)
+#   - Append PATH export to .zshrc / .bashrc / .bash_profile (idempotent)
+#   - Install shared-sync launchd job (every 30 min git pull, one per machine)
 #
 
 set -euo pipefail
 
-PRODUCT="${BEEVAST_PRODUCT:-master-brain}"
-ENV_NAME="${BEEVAST_ENV:-prod}"
 CHANNEL="${BEEVAST_CHANNEL:-stable}"
 PREFIX="${BEEVAST_PREFIX:-$HOME/.beevast}"
-# Default to the PUBLIC release mirror — no PAT required.
-# Set BEEVAST_REPO=yoyo20260321/beevast to pull from the private source
-# repo (legacy / dev test path); that needs GITHUB_TOKEN.
 GITHUB_REPO="${BEEVAST_REPO:-yoyo20260321/beevast-releases}"
 SHARED_REPO="${BEEVAST_SHARED_REPO:-git@github.com:yoyo20260321/beevast-shared.git}"
 LOCAL_TARBALL="${BEEVAST_TARBALL:-}"
 
-ENV_DIR="$PREFIX/apps/$PRODUCT/envs/$ENV_NAME"
 BIN_DIR="$PREFIX/bin"
 SHARED_DIR="$PREFIX/shared"
 
@@ -51,22 +43,14 @@ ok()   { printf "%s✔%s %s\n" "$C_GREEN" "$C_RESET" "$*"; }
 warn() { printf "%s⚠%s %s\n" "$C_YELLOW" "$C_RESET" "$*"; }
 err()  { printf "%s✗%s %s\n" "$C_RED" "$C_RESET" "$*" >&2; exit 1; }
 
-# ── 1. prereq checks (RFC 0010 决策 2/3/5) ─────────────────────────────
+# ── 1. prereq checks ───────────────────────────────────────────────────
 log "Checking prerequisites..."
 
-# 1.1 Node 22+
 command -v node >/dev/null || err "Node 22+ not found. Install: https://nodejs.org/"
 NODE_MAJOR=$(node -p "process.versions.node.split('.')[0]")
 [ "$NODE_MAJOR" -ge 22 ] || err "Need Node 22+, found v$NODE_MAJOR. Install: https://nodejs.org/"
 ok "Node v$(node -p 'process.versions.node')"
 
-# 1.2 npm
-command -v npm >/dev/null || err "npm not found (should ship with Node)"
-ok "npm $(npm -v)"
-
-# 1.3 GitHub PAT — only required for private repos.
-# beevast-releases is public; no token needed. The legacy private-repo
-# path (BEEVAST_REPO=yoyo20260321/beevast) still requires GITHUB_TOKEN.
 NEED_TOKEN=0
 if [ -z "$LOCAL_TARBALL" ]; then
   case "$GITHUB_REPO" in
@@ -74,16 +58,14 @@ if [ -z "$LOCAL_TARBALL" ]; then
     *)                              NEED_TOKEN=1 ;;
   esac
   if [ "$NEED_TOKEN" -eq 1 ]; then
-    [ -n "${GITHUB_TOKEN:-}" ] || err "GITHUB_TOKEN env var required for private repo $GITHUB_REPO. Create at: https://github.com/settings/tokens"
+    [ -n "${GITHUB_TOKEN:-}" ] || err "GITHUB_TOKEN env var required for private repo $GITHUB_REPO"
     ok "GITHUB_TOKEN present"
   else
     log "Using public release mirror $GITHUB_REPO (no auth needed)"
   fi
 fi
 
-# 1.4 GitHub SSH key (for beevast-shared private repo)
-# Note: ssh github.com always exits 1 (no shell), so we can't use the exit
-# code. We capture stderr and pattern-match the auth message.
+# GitHub SSH key — needed for beevast-shared clone.
 if [ ! -d "$SHARED_DIR/.git" ]; then
   SSH_OUT=$(ssh -T -o BatchMode=yes -o StrictHostKeyChecking=accept-new git@github.com 2>&1 || true)
   if echo "$SSH_OUT" | grep -q "successfully authenticated"; then
@@ -93,7 +75,7 @@ if [ ! -d "$SHARED_DIR/.git" ]; then
   fi
 fi
 
-# ── 2. fetch tarball (RFC 0010 §3) ─────────────────────────────────────
+# ── 2. fetch dispatcher tarball ────────────────────────────────────────
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
@@ -103,52 +85,52 @@ if [ -n "$LOCAL_TARBALL" ]; then
   cp "$LOCAL_TARBALL" "$TMP/beevast.tar.gz"
   VERSION="local"
 else
-  log "Fetching latest $CHANNEL release from $GITHUB_REPO..."
-  # /releases (plural) returns all releases including prereleases.
-  # stable channel filters prerelease=false; beta accepts any.
+  log "Fetching latest $CHANNEL release of beevast dispatcher from $GITHUB_REPO..."
   AUTH_HEADER=()
   if [ "$NEED_TOKEN" -eq 1 ]; then
     AUTH_HEADER=(-H "Authorization: token $GITHUB_TOKEN")
   fi
   RELEASES_JSON=$(curl -fsSL "${AUTH_HEADER[@]}" \
     -H "Accept: application/vnd.github+json" \
-    "https://api.github.com/repos/$GITHUB_REPO/releases?per_page=20") \
+    "https://api.github.com/repos/$GITHUB_REPO/releases?per_page=30") \
     || err "Failed to fetch releases"
 
   RELEASE_JSON=$(echo "$RELEASES_JSON" | CHANNEL="$CHANNEL" node -e "
     const all = JSON.parse(require('fs').readFileSync(0,'utf8'));
     const channel = process.env.CHANNEL;
     const match = all.find(r =>
-      !r.draft && (channel === 'beta' ? true : !r.prerelease)
+      !r.draft &&
+      r.tag_name.startsWith('beevast-v') &&
+      (channel === 'beta' ? true : !r.prerelease)
     );
     if (!match) {
-      console.error('no matching release for channel=' + channel);
+      console.error('no matching beevast release for channel=' + channel);
       process.exit(1);
     }
     process.stdout.write(JSON.stringify(match));
-  ") || err "No matching release found on $CHANNEL channel"
+  ") || err "No matching beevast release for channel=$CHANNEL"
 
-  VERSION=$(echo "$RELEASE_JSON" | node -p "JSON.parse(require('fs').readFileSync(0,'utf8')).tag_name.replace(/^v/,'')")
-  # Public repos: use browser_download_url (no auth, plain CDN).
-  # Private repos: use asset 'url' + Authorization header + octet-stream.
+  VERSION=$(echo "$RELEASE_JSON" | node -p "
+    JSON.parse(require('fs').readFileSync(0,'utf8')).tag_name.replace(/^beevast-v/, '')
+  ")
   if [ "$NEED_TOKEN" -eq 1 ]; then
     ASSET_URL=$(echo "$RELEASE_JSON" | node -p "
       const r = JSON.parse(require('fs').readFileSync(0,'utf8'));
-      const a = r.assets.find(x => /\\.tar\\.gz\$/.test(x.name) && !/\\.sha256\$/.test(x.name));
-      if (!a) throw new Error('no tarball asset in release');
+      const a = r.assets.find(x => /^beevast-.*\\.tar\\.gz\$/.test(x.name) && !/\\.sha256\$/.test(x.name));
+      if (!a) throw new Error('no beevast tarball asset in release');
       a.url
     ")
   else
     ASSET_URL=$(echo "$RELEASE_JSON" | node -p "
       const r = JSON.parse(require('fs').readFileSync(0,'utf8'));
-      const a = r.assets.find(x => /\\.tar\\.gz\$/.test(x.name) && !/\\.sha256\$/.test(x.name));
-      if (!a) throw new Error('no tarball asset in release');
+      const a = r.assets.find(x => /^beevast-.*\\.tar\\.gz\$/.test(x.name) && !/\\.sha256\$/.test(x.name));
+      if (!a) throw new Error('no beevast tarball asset in release');
       a.browser_download_url
     ")
   fi
-  ok "Found v$VERSION ($ASSET_URL)"
+  ok "Found beevast v$VERSION"
 
-  log "Downloading tarball..."
+  log "Downloading dispatcher tarball..."
   DL_HEADERS=()
   if [ "$NEED_TOKEN" -eq 1 ]; then
     DL_HEADERS+=(-H "Authorization: token $GITHUB_TOKEN" -H "Accept: application/octet-stream")
@@ -157,22 +139,31 @@ else
   ok "Downloaded $(du -h "$TMP/beevast.tar.gz" | cut -f1)"
 fi
 
-# ── 3. extract to env dir (RFC 0010 §1 layout) ─────────────────────────
-log "Installing to $ENV_DIR ..."
-mkdir -p "$ENV_DIR"
-# Clean previous beevast.mjs / package.json / VERSION (preserve bots/ runtime/ .staging/)
-rm -f "$ENV_DIR/beevast.mjs" "$ENV_DIR/package.json" "$ENV_DIR/VERSION"
-tar -xzf "$TMP/beevast.tar.gz" -C "$ENV_DIR"
-chmod +x "$ENV_DIR/beevast.mjs"
-ok "Extracted to $ENV_DIR"
+# ── 3. install dispatcher to ~/.beevast/bin/beevast ────────────────────
+log "Installing dispatcher to $BIN_DIR ..."
+mkdir -p "$BIN_DIR"
+# Tarball contains: beevast.mjs + package.json + VERSION. We only need
+# beevast.mjs for the dispatcher (no native deps).
+tar -xzf "$TMP/beevast.tar.gz" -C "$TMP/extract" 2>/dev/null || {
+  mkdir -p "$TMP/extract"
+  tar -xzf "$TMP/beevast.tar.gz" -C "$TMP/extract"
+}
+[ -f "$TMP/extract/beevast.mjs" ] || err "beevast.mjs missing from tarball"
+mv "$TMP/extract/beevast.mjs" "$BIN_DIR/beevast"
+chmod +x "$BIN_DIR/beevast"
+# Make sure the file starts with a shebang.
+head -n 1 "$BIN_DIR/beevast" | grep -q '^#!' || {
+  printf '#!/usr/bin/env node\n%s' "$(cat "$BIN_DIR/beevast")" > "$BIN_DIR/beevast"
+  chmod +x "$BIN_DIR/beevast"
+}
+ok "Installed $BIN_DIR/beevast v$VERSION"
 
-# ── 4. npm install (RFC 0010 决策 4: better-sqlite3 at install time) ───
-log "Installing native dependencies (better-sqlite3)..."
-(cd "$ENV_DIR" && npm install --omit=dev --silent --no-audit --no-fund) \
-  || err "npm install failed in $ENV_DIR"
-ok "Native deps installed"
+# Clean legacy per-env binaries left from pre-#18 installs.
+rm -f "$BIN_DIR/master-brain-prod" "$BIN_DIR/master-brain-pre1" \
+      "$BIN_DIR/master-brain-pre2" "$BIN_DIR/master-brain-pre3" \
+      "$BIN_DIR/master-brain" 2>/dev/null || true
 
-# ── 5. clone beevast-shared if missing (RFC 0009.5) ────────────────────
+# ── 4. clone beevast-shared if missing ─────────────────────────────────
 if [ ! -d "$SHARED_DIR/.agents" ]; then
   log "Cloning beevast-shared..."
   mkdir -p "$(dirname "$SHARED_DIR")"
@@ -182,50 +173,30 @@ else
   log "beevast-shared already at $SHARED_DIR (skipping clone)"
 fi
 
-# ── 6. build PATH symlink (RFC 0010 决策 12) ───────────────────────────
-mkdir -p "$BIN_DIR"
-BIN_LINK="$BIN_DIR/beevast-$ENV_NAME"
-ln -sfn "$ENV_DIR/beevast.mjs" "$BIN_LINK"
-ok "Linked $BIN_LINK → $ENV_DIR/beevast.mjs"
-
-# Also create / refresh the canonical `beevast` entry — used for the
-# unified setup wizard (no env in name). Points at the most recently
-# installed env. setup detects "no env from binary path" and prompts.
-ln -sfn "$ENV_DIR/beevast.mjs" "$BIN_DIR/beevast"
-ok "Linked $BIN_DIR/beevast → $ENV_DIR/beevast.mjs (unified entry)"
-
-# ── 7. PATH wiring (RFC 0010 决策 6: idempotent) ───────────────────────
+# ── 5. PATH wiring (multi-shell, idempotent) ───────────────────────────
 PATH_LINE='export PATH="$HOME/.beevast/bin:$PATH"'
-RC=""
-case "${SHELL:-}" in
-  */zsh)  RC="$HOME/.zshrc" ;;
-  */bash) RC="$HOME/.bashrc" ;;
-esac
-
-if [ -n "$RC" ]; then
+WROTE_ANY=0
+for RC_NAME in .zshrc .bashrc .bash_profile; do
+  RC="$HOME/$RC_NAME"
+  [ -f "$RC" ] || continue
   if grep -qF '.beevast/bin' "$RC" 2>/dev/null; then
     log "PATH already in $RC (skipping)"
   else
     printf '\n# BeeVast (RFC 0010)\n%s\n' "$PATH_LINE" >> "$RC"
     ok "Appended PATH to $RC"
+    WROTE_ANY=1
   fi
-else
-  warn "Unknown shell ($SHELL). Add this manually to your rc file:"
+done
+if [ "$WROTE_ANY" -eq 0 ] && [ ! -f "$HOME/.zshrc" ] && [ ! -f "$HOME/.bashrc" ] && [ ! -f "$HOME/.bash_profile" ]; then
+  warn "No .zshrc / .bashrc / .bash_profile found. Add manually:"
   printf '  %s\n' "$PATH_LINE"
 fi
 
-# ── 8. install shared-sync launchd job (one per machine, idempotent) ──
-# Every 30 min pulls ~/.beevast/shared so memory/skills/subagents stay
-# current across all envs on this machine. Label is env-independent, so
-# installing multiple envs on the same machine only creates ONE job.
+# ── 6. shared-sync launchd job (every 30 min, one per machine) ─────────
 if [[ "$(uname -s)" == "Darwin" ]]; then
   SYNC_LABEL="io.beevast.shared-sync"
   SYNC_PLIST="$HOME/Library/LaunchAgents/$SYNC_LABEL.plist"
-  if [ ! -f "$SYNC_PLIST" ]; then
-    mkdir -p "$HOME/Library/LaunchAgents"
-    # Every 30 minutes (1800 seconds). launchd fires shortly after install
-    # too (RunAtLoad implicit via StartInterval scheduling).
-    cat > "$SYNC_PLIST" <<PLIST
+  DESIRED=$(cat <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -237,35 +208,47 @@ if [[ "$(uname -s)" == "Darwin" ]]; then
     <string>/usr/bin/env</string>
     <string>bash</string>
     <string>-c</string>
-    <string>cd $SHARED_DIR && git pull --ff-only --quiet 2>&amp;1 | tee -a $PREFIX/shared-sync.log</string>
+    <string>cd $SHARED_DIR &amp;&amp; git pull --ff-only --quiet 2&gt;&amp;1 | tee -a $PREFIX/shared-sync.log</string>
   </array>
   <key>StartInterval</key>
   <integer>1800</integer>
-  <key>StandardOutPath</key><string>$PREFIX/shared-sync.log</string>
-  <key>StandardErrorPath</key><string>$PREFIX/shared-sync.log</string>
+  <key>StandardOutPath</key>
+  <string>$PREFIX/shared-sync.log</string>
+  <key>StandardErrorPath</key>
+  <string>$PREFIX/shared-sync.log</string>
 </dict>
 </plist>
 PLIST
-    BEEVAST_UID=$(id -u)
+)
+  BEEVAST_UID=$(id -u)
+  if [ ! -f "$SYNC_PLIST" ]; then
+    mkdir -p "$HOME/Library/LaunchAgents"
+    printf '%s\n' "$DESIRED" > "$SYNC_PLIST"
     launchctl bootstrap "gui/$BEEVAST_UID" "$SYNC_PLIST" >/dev/null 2>&1 \
       || launchctl load "$SYNC_PLIST" >/dev/null 2>&1 || true
     ok "Installed shared-sync launchd job (every 30 min)"
+  elif [ "$(cat "$SYNC_PLIST")" != "$DESIRED" ]; then
+    log "shared-sync plist changed, rewriting + reloading"
+    launchctl bootout "gui/$BEEVAST_UID/$SYNC_LABEL" >/dev/null 2>&1 || true
+    printf '%s\n' "$DESIRED" > "$SYNC_PLIST"
+    launchctl bootstrap "gui/$BEEVAST_UID" "$SYNC_PLIST" >/dev/null 2>&1 \
+      || launchctl load "$SYNC_PLIST" >/dev/null 2>&1 || true
+    ok "Updated shared-sync launchd job"
   else
-    log "shared-sync launchd job already installed (one per machine)"
+    log "shared-sync launchd job already up to date (one per machine)"
   fi
 fi
 
-# ── 9. done ────────────────────────────────────────────────────────────
+# ── 7. done ────────────────────────────────────────────────────────────
 echo
-ok "Installed beevast-$ENV_NAME v$VERSION → $ENV_DIR"
+ok "Installed beevast dispatcher v$VERSION → $BIN_DIR/beevast"
 echo
 echo "Next steps:"
 echo "  1. Reload your shell:    source ${RC:-<your rc file>}"
-echo "  2. Configure a bot:      mkdir -p $ENV_DIR/bots && \\"
-echo "                           vim $ENV_DIR/bots/<botId>.json"
-echo "  3. Start it:             beevast-$ENV_NAME brain start --bot <botId>"
+echo "  2. Install a product:    beevast install master-brain --env prod"
+echo "                           # or: --env pre1 / pre2 / pre3"
+echo "                           # use --channel beta for pre-release versions"
+echo "  3. Configure a bot:      beevast setup master-brain --env prod"
+echo "  4. Start the bot:        beevast start master-brain --env prod --bot <id>"
 echo
-echo "Optional — launchd autostart (macOS):"
-echo "  beevast-$ENV_NAME install --autostart --bot <botId>"
-echo
-echo "Documentation: docs/runbooks/v2-deploy-workflow.md"
+echo "Docs: docs/runbooks/v2-deploy-workflow.md  |  RFC 0010 (decisions #18-#20)"
