@@ -215,15 +215,16 @@ else
 fi
 
 # ── 8. install shared-sync launchd job (one per machine, idempotent) ──
-# Daily pulls ~/.beevast/shared so memory/skills/subagents stay current
-# across all envs on this machine. Label is env-independent, so installing
-# multiple envs on the same machine only creates ONE job.
+# Every 30 min pulls ~/.beevast/shared so memory/skills/subagents stay
+# current across all envs on this machine. Label is env-independent, so
+# installing multiple envs on the same machine only creates ONE job.
 if [[ "$(uname -s)" == "Darwin" ]]; then
   SYNC_LABEL="io.beevast.shared-sync"
   SYNC_PLIST="$HOME/Library/LaunchAgents/$SYNC_LABEL.plist"
   if [ ! -f "$SYNC_PLIST" ]; then
     mkdir -p "$HOME/Library/LaunchAgents"
-    # Daily at 05:13 local time (off-peak; minute=13 reduces clock-thunder)
+    # Every 30 minutes (1800 seconds). launchd fires shortly after install
+    # too (RunAtLoad implicit via StartInterval scheduling).
     cat > "$SYNC_PLIST" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -238,11 +239,8 @@ if [[ "$(uname -s)" == "Darwin" ]]; then
     <string>-c</string>
     <string>cd $SHARED_DIR && git pull --ff-only --quiet 2>&amp;1 | tee -a $PREFIX/shared-sync.log</string>
   </array>
-  <key>StartCalendarInterval</key>
-  <dict>
-    <key>Hour</key><integer>5</integer>
-    <key>Minute</key><integer>13</integer>
-  </dict>
+  <key>StartInterval</key>
+  <integer>1800</integer>
   <key>StandardOutPath</key><string>$PREFIX/shared-sync.log</string>
   <key>StandardErrorPath</key><string>$PREFIX/shared-sync.log</string>
 </dict>
@@ -251,7 +249,7 @@ PLIST
     UID=$(id -u)
     launchctl bootstrap "gui/$UID" "$SYNC_PLIST" >/dev/null 2>&1 \
       || launchctl load "$SYNC_PLIST" >/dev/null 2>&1 || true
-    ok "Installed shared-sync launchd job (daily 05:13)"
+    ok "Installed shared-sync launchd job (every 30 min)"
   else
     log "shared-sync launchd job already installed (one per machine)"
   fi
