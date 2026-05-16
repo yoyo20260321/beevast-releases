@@ -214,7 +214,50 @@ else
   printf '  %s\n' "$PATH_LINE"
 fi
 
-# ── 8. done ────────────────────────────────────────────────────────────
+# ── 8. install shared-sync launchd job (one per machine, idempotent) ──
+# Daily pulls ~/.beevast/shared so memory/skills/subagents stay current
+# across all envs on this machine. Label is env-independent, so installing
+# multiple envs on the same machine only creates ONE job.
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  SYNC_LABEL="io.beevast.shared-sync"
+  SYNC_PLIST="$HOME/Library/LaunchAgents/$SYNC_LABEL.plist"
+  if [ ! -f "$SYNC_PLIST" ]; then
+    mkdir -p "$HOME/Library/LaunchAgents"
+    # Daily at 05:13 local time (off-peak; minute=13 reduces clock-thunder)
+    cat > "$SYNC_PLIST" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>$SYNC_LABEL</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/env</string>
+    <string>bash</string>
+    <string>-c</string>
+    <string>cd $SHARED_DIR && git pull --ff-only --quiet 2>&amp;1 | tee -a $PREFIX/shared-sync.log</string>
+  </array>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key><integer>5</integer>
+    <key>Minute</key><integer>13</integer>
+  </dict>
+  <key>StandardOutPath</key><string>$PREFIX/shared-sync.log</string>
+  <key>StandardErrorPath</key><string>$PREFIX/shared-sync.log</string>
+</dict>
+</plist>
+PLIST
+    UID=$(id -u)
+    launchctl bootstrap "gui/$UID" "$SYNC_PLIST" >/dev/null 2>&1 \
+      || launchctl load "$SYNC_PLIST" >/dev/null 2>&1 || true
+    ok "Installed shared-sync launchd job (daily 05:13)"
+  else
+    log "shared-sync launchd job already installed (one per machine)"
+  fi
+fi
+
+# ── 9. done ────────────────────────────────────────────────────────────
 echo
 ok "Installed beevast-$ENV_NAME v$VERSION → $ENV_DIR"
 echo
