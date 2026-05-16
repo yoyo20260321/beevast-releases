@@ -188,6 +188,12 @@ BIN_LINK="$BIN_DIR/beevast-$ENV_NAME"
 ln -sfn "$ENV_DIR/beevast.mjs" "$BIN_LINK"
 ok "Linked $BIN_LINK → $ENV_DIR/beevast.mjs"
 
+# Also create / refresh the canonical `beevast` entry — used for the
+# unified setup wizard (no env in name). Points at the most recently
+# installed env. setup detects "no env from binary path" and prompts.
+ln -sfn "$ENV_DIR/beevast.mjs" "$BIN_DIR/beevast"
+ok "Linked $BIN_DIR/beevast → $ENV_DIR/beevast.mjs (unified entry)"
+
 # ── 7. PATH wiring (RFC 0010 决策 6: idempotent) ───────────────────────
 PATH_LINE='export PATH="$HOME/.beevast/bin:$PATH"'
 RC=""
