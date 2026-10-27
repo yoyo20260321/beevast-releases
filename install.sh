@@ -90,7 +90,7 @@ else
   if [ "$NEED_TOKEN" -eq 1 ]; then
     AUTH_HEADER=(-H "Authorization: token $GITHUB_TOKEN")
   fi
-  RELEASES_JSON=$(curl -fsSL "${AUTH_HEADER[@]}" \
+  RELEASES_JSON=$(curl -fsSL ${AUTH_HEADER[@]+"${AUTH_HEADER[@]}"} \
     -H "Accept: application/vnd.github+json" \
     "https://api.github.com/repos/$GITHUB_REPO/releases?per_page=30") \
     || err "Failed to fetch releases"
@@ -135,7 +135,7 @@ else
   if [ "$NEED_TOKEN" -eq 1 ]; then
     DL_HEADERS+=(-H "Authorization: token $GITHUB_TOKEN" -H "Accept: application/octet-stream")
   fi
-  curl -fsSL "${DL_HEADERS[@]}" "$ASSET_URL" -o "$TMP/beevast.tar.gz"
+  curl -fsSL ${DL_HEADERS[@]+"${DL_HEADERS[@]}"} "$ASSET_URL" -o "$TMP/beevast.tar.gz"
   ok "Downloaded $(du -h "$TMP/beevast.tar.gz" | cut -f1)"
 fi
 
